@@ -72,6 +72,10 @@ enum ConnectionCommands {
         /// Skip TLS for PostgreSQL connection
         #[arg(long)]
         db_no_ssl: bool,
+
+        /// Print each deletion result
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Count all connections using pagination
     Count {
@@ -138,6 +142,10 @@ enum PresexCommands {
         /// Skip TLS for PostgreSQL connection
         #[arg(long)]
         db_no_ssl: bool,
+
+        /// Print each deletion result
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Count all presentation exchange records using pagination
     Count {
@@ -204,6 +212,10 @@ enum CredexCommands {
         /// Skip TLS for PostgreSQL connection
         #[arg(long)]
         db_no_ssl: bool,
+
+        /// Print each deletion result
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Count all credential exchange records using pagination
     Count {
@@ -270,6 +282,10 @@ enum OobCommands {
         /// Skip TLS for PostgreSQL connection
         #[arg(long)]
         db_no_ssl: bool,
+
+        /// Print each deletion result
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Count all out-of-band invitations using pagination
     Count {
@@ -509,9 +525,10 @@ async fn main() {
                 dry_run,
                 db,
                 db_no_ssl,
+                verbose,
             } => {
                 let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
+                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
                     .await
             }
             ConnectionCommands::Count {
@@ -539,9 +556,10 @@ async fn main() {
                 dry_run,
                 db,
                 db_no_ssl,
+                verbose,
             } => {
                 let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
+                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
                     .await
             }
             PresexCommands::Count {
@@ -569,9 +587,10 @@ async fn main() {
                 dry_run,
                 db,
                 db_no_ssl,
+                verbose,
             } => {
                 let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
+                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
                     .await
             }
             CredexCommands::Count {
@@ -599,9 +618,10 @@ async fn main() {
                 dry_run,
                 db,
                 db_no_ssl,
+                verbose,
             } => {
                 let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
+                delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
                     .await
             }
             OobCommands::Count {
@@ -639,6 +659,7 @@ async fn delete_all_connections(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    verbose: bool,
     db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
@@ -693,12 +714,14 @@ async fn delete_all_connections(
                 async move {
                     match delete_connection(client, base_url, &conn.connection_id).await {
                         Ok(()) => {
-                            let state = conn.state.as_deref().unwrap_or("unknown");
-                            let label = conn.their_label.as_deref().unwrap_or("N/A");
-                            println!(
-                                "  Deleted: {} (state={}, label={})",
-                                conn.connection_id, state, label
-                            );
+                            if verbose {
+                                let state = conn.state.as_deref().unwrap_or("unknown");
+                                let label = conn.their_label.as_deref().unwrap_or("N/A");
+                                println!(
+                                    "  Deleted: {} (state={}, label={})",
+                                    conn.connection_id, state, label
+                                );
+                            }
                             true
                         }
                         Err(e) => {
@@ -776,6 +799,7 @@ async fn delete_all_presex(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    verbose: bool,
     db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
@@ -830,12 +854,14 @@ async fn delete_all_presex(
                 async move {
                     match delete_presentation_exchange(client, base_url, &rec.presentation_exchange_id).await {
                         Ok(()) => {
-                            let state = rec.state.as_deref().unwrap_or("unknown");
-                            let conn_id = rec.connection_id.as_deref().unwrap_or("N/A");
-                            println!(
-                                "  Deleted: {} (state={}, connection_id={})",
-                                rec.presentation_exchange_id, state, conn_id
-                            );
+                            if verbose {
+                                let state = rec.state.as_deref().unwrap_or("unknown");
+                                let conn_id = rec.connection_id.as_deref().unwrap_or("N/A");
+                                println!(
+                                    "  Deleted: {} (state={}, connection_id={})",
+                                    rec.presentation_exchange_id, state, conn_id
+                                );
+                            }
                             true
                         }
                         Err(e) => {
@@ -950,6 +976,7 @@ async fn delete_all_credex(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    verbose: bool,
     db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
@@ -1002,7 +1029,9 @@ async fn delete_all_credex(
                 async move {
                     match delete_credential_exchange(client, base_url, &rec.credential_exchange_id).await {
                         Ok(()) => {
-                            println!("  Deleted: {}", rec.credential_exchange_id);
+                            if verbose {
+                                println!("  Deleted: {}", rec.credential_exchange_id);
+                            }
                             true
                         }
                         Err(e) => {
@@ -1106,6 +1135,7 @@ async fn delete_all_oob(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    verbose: bool,
     db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
@@ -1147,12 +1177,14 @@ async fn delete_all_oob(
                 async move {
                     match delete_oob_invitation(client, base_url, &rec.oob_id).await {
                         Ok(()) => {
-                            let state = rec.state.as_deref().unwrap_or("unknown");
-                            let invi_msg_id = rec.invi_msg_id.as_deref().unwrap_or("N/A");
-                            println!(
-                                "  Deleted: {} (state={}, invi_msg_id={})",
-                                rec.oob_id, state, invi_msg_id
-                            );
+                            if verbose {
+                                let state = rec.state.as_deref().unwrap_or("unknown");
+                                let invi_msg_id = rec.invi_msg_id.as_deref().unwrap_or("N/A");
+                                println!(
+                                    "  Deleted: {} (state={}, invi_msg_id={})",
+                                    rec.oob_id, state, invi_msg_id
+                                );
+                            }
                             true
                         }
                         Err(e) => {
