@@ -473,7 +473,7 @@ async fn get_oob_invitations(
     offset: u32,
 ) -> Result<Vec<OobInvitation>, reqwest::Error> {
     let url = format!(
-        "{}/out-of-band/invitations?limit={}&offset={}",
+        "{}/out-of-band/records?limit={}&offset={}",
         base_url, limit, offset
     );
     let resp = client.get(&url).send().await?.error_for_status()?;
