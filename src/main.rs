@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
+use futures::future::join_all;
 use serde::Deserialize;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 #[derive(Parser, Debug)]
 #[command(name = "acapy-tools")]
@@ -26,6 +28,16 @@ enum Commands {
         #[command(subcommand)]
         action: CredexCommands,
     },
+    /// Out-of-band invitation management commands
+    Oob {
+        #[command(subcommand)]
+        action: OobCommands,
+    },
+    /// Direct database management commands
+    Db {
+        #[command(subcommand)]
+        action: DbCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -51,6 +63,10 @@ enum ConnectionCommands {
         /// Show records without deleting
         #[arg(short, long)]
         dry_run: bool,
+
+        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Count all connections using pagination
     Count {
@@ -109,6 +125,10 @@ enum PresexCommands {
         /// Show records without deleting
         #[arg(short, long)]
         dry_run: bool,
+
+        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Count all presentation exchange records using pagination
     Count {
@@ -167,6 +187,10 @@ enum CredexCommands {
         /// Show records without deleting
         #[arg(short, long)]
         dry_run: bool,
+
+        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Count all credential exchange records using pagination
     Count {
@@ -199,6 +223,78 @@ enum CredexCommands {
         /// ACA-Py Admin API base URL
         #[arg(short = 'u', long, default_value = "http://localhost:8021")]
         base_url: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OobCommands {
+    /// Delete all out-of-band invitations
+    Delete {
+        /// Bearer token for Authorization header (optional)
+        #[arg(short, long)]
+        token: Option<String>,
+
+        /// API key for X-API-Key header (optional)
+        #[arg(short = 'k', long)]
+        api_key: Option<String>,
+
+        /// ACA-Py Admin API base URL
+        #[arg(short = 'u', long, default_value = "http://localhost:8021")]
+        base_url: String,
+
+        /// Number of records to fetch per batch
+        #[arg(short, long, default_value_t = 5)]
+        batch_size: u32,
+
+        /// Show records without deleting
+        #[arg(short, long)]
+        dry_run: bool,
+
+        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Count all out-of-band invitations using pagination
+    Count {
+        /// Bearer token for Authorization header (optional)
+        #[arg(short, long)]
+        token: Option<String>,
+
+        /// API key for X-API-Key header (optional)
+        #[arg(short = 'k', long)]
+        api_key: Option<String>,
+
+        /// ACA-Py Admin API base URL
+        #[arg(short = 'u', long, default_value = "http://localhost:8021")]
+        base_url: String,
+
+        /// Number of records to fetch per batch
+        #[arg(short, long, default_value_t = 5)]
+        batch_size: u32,
+    },
+    /// List out-of-band invitation IDs (limited to 5)
+    List {
+        /// Bearer token for Authorization header (optional)
+        #[arg(short, long)]
+        token: Option<String>,
+
+        /// API key for X-API-Key header (optional)
+        #[arg(short = 'k', long)]
+        api_key: Option<String>,
+
+        /// ACA-Py Admin API base URL
+        #[arg(short = 'u', long, default_value = "http://localhost:8021")]
+        base_url: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DbCommands {
+    /// Run VACUUM ANALYZE on the database
+    Vacuum {
+        /// PostgreSQL connection string (e.g., "host=localhost user=postgres dbname=acapy")
+        #[arg(short, long)]
+        connection: String,
     },
 }
 
@@ -239,6 +335,18 @@ struct CredentialExchange {
 #[derive(Debug, Deserialize)]
 struct CredentialExchangeResponse {
     results: Vec<CredentialExchange>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OobInvitation {
+    oob_id: String,
+    invi_msg_id: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OobInvitationResponse {
+    results: Vec<OobInvitation>,
 }
 
 fn build_client(token: Option<&str>, api_key: Option<&str>) -> reqwest::Client {
@@ -330,6 +438,21 @@ async fn delete_credential_exchange(
     Ok(())
 }
 
+async fn get_oob_invitations(
+    client: &reqwest::Client,
+    base_url: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<OobInvitation>, reqwest::Error> {
+    let url = format!(
+        "{}/out-of-band/invitations?limit={}&offset={}",
+        base_url, limit, offset
+    );
+    let resp = client.get(&url).send().await?.error_for_status()?;
+    let data: OobInvitationResponse = resp.json().await?;
+    Ok(data.results)
+}
+
 async fn delete_oob_invitation(
     client: &reqwest::Client,
     base_url: &str,
@@ -352,8 +475,10 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
+                db,
             } => {
-                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run)
+                let db_client = connect_db(db.as_deref()).await;
+                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
                     .await;
             }
             ConnectionCommands::Count {
@@ -379,8 +504,10 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
+                db,
             } => {
-                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run)
+                let db_client = connect_db(db.as_deref()).await;
+                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
                     .await;
             }
             PresexCommands::Count {
@@ -406,8 +533,10 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
+                db,
             } => {
-                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run)
+                let db_client = connect_db(db.as_deref()).await;
+                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
                     .await;
             }
             CredexCommands::Count {
@@ -426,6 +555,40 @@ async fn main() {
                 list_credex(token.as_deref(), api_key.as_deref(), &base_url).await;
             }
         },
+        Commands::Oob { action } => match action {
+            OobCommands::Delete {
+                token,
+                api_key,
+                base_url,
+                batch_size,
+                dry_run,
+                db,
+            } => {
+                let db_client = connect_db(db.as_deref()).await;
+                delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
+                    .await;
+            }
+            OobCommands::Count {
+                token,
+                api_key,
+                base_url,
+                batch_size,
+            } => {
+                count_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await;
+            }
+            OobCommands::List {
+                token,
+                api_key,
+                base_url,
+            } => {
+                list_oob(token.as_deref(), api_key.as_deref(), &base_url).await;
+            }
+        },
+        Commands::Db { action } => match action {
+            DbCommands::Vacuum { connection } => {
+                vacuum_analyze(&connection).await;
+            }
+        },
     }
 }
 
@@ -435,9 +598,11 @@ async fn delete_all_connections(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    db_client: Option<&tokio_postgres::Client>,
 ) {
     let client = build_client(token, api_key);
     let mut total_deleted = 0u32;
+    let mut since_last_vacuum = 0u32;
 
     loop {
         let connections = match get_connections(&client, base_url, batch_size, 0).await {
@@ -455,36 +620,57 @@ async fn delete_all_connections(
 
         println!("Found {} connection(s)", connections.len());
 
-        for conn in connections {
-            let state = conn.state.as_deref().unwrap_or("unknown");
-            let label = conn.their_label.as_deref().unwrap_or("N/A");
-            let invi_msg_id = conn.invitation_msg_id.as_deref();
-
-            if dry_run {
+        if dry_run {
+            for conn in &connections {
+                let state = conn.state.as_deref().unwrap_or("unknown");
+                let label = conn.their_label.as_deref().unwrap_or("N/A");
+                let oob = conn.invitation_msg_id.as_deref().unwrap_or("N/A");
                 println!(
                     "  [DRY-RUN] Would delete: {} (state={}, label={}, oob={})",
-                    conn.connection_id, state, label, invi_msg_id.unwrap_or("N/A")
+                    conn.connection_id, state, label, oob
                 );
-            } else {
-                // Delete OOB first if exists
-                if let Some(oob_id) = invi_msg_id {
-                    match delete_oob_invitation(&client, base_url, oob_id).await {
-                        Ok(()) => println!("    Deleted OOB: {}", oob_id),
-                        Err(_) => {} // OOB may not exist or already deleted
+            }
+        } else {
+            // Delete OOB invitations in parallel
+            let oob_futures: Vec<_> = connections.iter()
+                .filter_map(|conn| conn.invitation_msg_id.as_deref().map(|oob_id| {
+                    let client = &client;
+                    let oob_id = oob_id.to_string();
+                    async move {
+                        let _ = delete_oob_invitation(client, base_url, &oob_id).await;
+                    }
+                }))
+                .collect();
+            join_all(oob_futures).await;
+
+            // Delete connections in parallel
+            let delete_futures: Vec<_> = connections.iter().map(|conn| {
+                let client = &client;
+                async move {
+                    match delete_connection(client, base_url, &conn.connection_id).await {
+                        Ok(()) => {
+                            let state = conn.state.as_deref().unwrap_or("unknown");
+                            let label = conn.their_label.as_deref().unwrap_or("N/A");
+                            println!(
+                                "  Deleted: {} (state={}, label={})",
+                                conn.connection_id, state, label
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed to delete {}: {}", conn.connection_id, e);
+                            false
+                        }
                     }
                 }
-                match delete_connection(&client, base_url, &conn.connection_id).await {
-                    Ok(()) => {
-                        println!(
-                            "  Deleted: {} (state={}, label={})",
-                            conn.connection_id, state, label
-                        );
-                        total_deleted += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Failed to delete {}: {}", conn.connection_id, e);
-                    }
-                }
+            }).collect();
+            let results = join_all(delete_futures).await;
+            let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
+            total_deleted += batch_deleted;
+            since_last_vacuum += batch_deleted;
+            if since_last_vacuum >= 1000 {
+                run_vacuum(db_client).await;
+                since_last_vacuum = 0;
             }
         }
     }
@@ -492,6 +678,7 @@ async fn delete_all_connections(
     if dry_run {
         println!("Dry run complete. No connections were deleted.");
     } else {
+        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 }
@@ -539,9 +726,11 @@ async fn delete_all_presex(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    db_client: Option<&tokio_postgres::Client>,
 ) {
     let client = build_client(token, api_key);
     let mut total_deleted = 0u32;
+    let mut since_last_vacuum = 0u32;
 
     loop {
         let records = match get_presentation_exchanges(&client, base_url, batch_size, 0).await {
@@ -559,36 +748,57 @@ async fn delete_all_presex(
 
         println!("Found {} presentation exchange record(s)", records.len());
 
-        for rec in records {
-            let state = rec.state.as_deref().unwrap_or("unknown");
-            let conn_id = rec.connection_id.as_deref().unwrap_or("N/A");
-            let parent_thread = rec.parent_thread_id.as_deref();
-
-            if dry_run {
+        if dry_run {
+            for rec in &records {
+                let state = rec.state.as_deref().unwrap_or("unknown");
+                let conn_id = rec.connection_id.as_deref().unwrap_or("N/A");
+                let oob = rec.parent_thread_id.as_deref().unwrap_or("N/A");
                 println!(
                     "  [DRY-RUN] Would delete: {} (state={}, connection_id={}, oob={})",
-                    rec.presentation_exchange_id, state, conn_id, parent_thread.unwrap_or("N/A")
+                    rec.presentation_exchange_id, state, conn_id, oob
                 );
-            } else {
-                // Delete OOB first if exists
-                if let Some(oob_id) = parent_thread {
-                    match delete_oob_invitation(&client, base_url, oob_id).await {
-                        Ok(()) => println!("    Deleted OOB: {}", oob_id),
-                        Err(_) => {} // OOB may not exist or already deleted
+            }
+        } else {
+            // Delete OOB invitations in parallel
+            let oob_futures: Vec<_> = records.iter()
+                .filter_map(|rec| rec.parent_thread_id.as_deref().map(|oob_id| {
+                    let client = &client;
+                    let oob_id = oob_id.to_string();
+                    async move {
+                        let _ = delete_oob_invitation(client, base_url, &oob_id).await;
+                    }
+                }))
+                .collect();
+            join_all(oob_futures).await;
+
+            // Delete presentation exchanges in parallel
+            let delete_futures: Vec<_> = records.iter().map(|rec| {
+                let client = &client;
+                async move {
+                    match delete_presentation_exchange(client, base_url, &rec.presentation_exchange_id).await {
+                        Ok(()) => {
+                            let state = rec.state.as_deref().unwrap_or("unknown");
+                            let conn_id = rec.connection_id.as_deref().unwrap_or("N/A");
+                            println!(
+                                "  Deleted: {} (state={}, connection_id={})",
+                                rec.presentation_exchange_id, state, conn_id
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed to delete {}: {}", rec.presentation_exchange_id, e);
+                            false
+                        }
                     }
                 }
-                match delete_presentation_exchange(&client, base_url, &rec.presentation_exchange_id).await {
-                    Ok(()) => {
-                        println!(
-                            "  Deleted: {} (state={}, connection_id={})",
-                            rec.presentation_exchange_id, state, conn_id
-                        );
-                        total_deleted += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Failed to delete {}: {}", rec.presentation_exchange_id, e);
-                    }
-                }
+            }).collect();
+            let results = join_all(delete_futures).await;
+            let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
+            total_deleted += batch_deleted;
+            since_last_vacuum += batch_deleted;
+            if since_last_vacuum >= 1000 {
+                run_vacuum(db_client).await;
+                since_last_vacuum = 0;
             }
         }
     }
@@ -596,6 +806,7 @@ async fn delete_all_presex(
     if dry_run {
         println!("Dry run complete. No presentation exchanges were deleted.");
     } else {
+        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 }
@@ -680,9 +891,11 @@ async fn delete_all_credex(
     base_url: &str,
     batch_size: u32,
     dry_run: bool,
+    db_client: Option<&tokio_postgres::Client>,
 ) {
     let client = build_client(token, api_key);
     let mut total_deleted = 0u32;
+    let mut since_last_vacuum = 0u32;
 
     loop {
         let records = match get_credential_exchanges(&client, base_url, batch_size, 0).await {
@@ -700,31 +913,50 @@ async fn delete_all_credex(
 
         println!("Found {} credential exchange record(s)", records.len());
 
-        for rec in records {
-            let parent_thread = rec.parent_thread_id.as_deref();
-
-            if dry_run {
+        if dry_run {
+            for rec in &records {
+                let oob = rec.parent_thread_id.as_deref().unwrap_or("N/A");
                 println!(
                     "  [DRY-RUN] Would delete: {} (oob={})",
-                    rec.credential_exchange_id, parent_thread.unwrap_or("N/A")
+                    rec.credential_exchange_id, oob
                 );
-            } else {
-                // Delete OOB first if exists
-                if let Some(oob_id) = parent_thread {
-                    match delete_oob_invitation(&client, base_url, oob_id).await {
-                        Ok(()) => println!("    Deleted OOB: {}", oob_id),
-                        Err(_) => {} // OOB may not exist or already deleted
+            }
+        } else {
+            // Delete OOB invitations in parallel
+            let oob_futures: Vec<_> = records.iter()
+                .filter_map(|rec| rec.parent_thread_id.as_deref().map(|oob_id| {
+                    let client = &client;
+                    let oob_id = oob_id.to_string();
+                    async move {
+                        let _ = delete_oob_invitation(client, base_url, &oob_id).await;
+                    }
+                }))
+                .collect();
+            join_all(oob_futures).await;
+
+            // Delete credential exchanges in parallel
+            let delete_futures: Vec<_> = records.iter().map(|rec| {
+                let client = &client;
+                async move {
+                    match delete_credential_exchange(client, base_url, &rec.credential_exchange_id).await {
+                        Ok(()) => {
+                            println!("  Deleted: {}", rec.credential_exchange_id);
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed to delete {}: {}", rec.credential_exchange_id, e);
+                            false
+                        }
                     }
                 }
-                match delete_credential_exchange(&client, base_url, &rec.credential_exchange_id).await {
-                    Ok(()) => {
-                        println!("  Deleted: {}", rec.credential_exchange_id);
-                        total_deleted += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Failed to delete {}: {}", rec.credential_exchange_id, e);
-                    }
-                }
+            }).collect();
+            let results = join_all(delete_futures).await;
+            let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
+            total_deleted += batch_deleted;
+            since_last_vacuum += batch_deleted;
+            if since_last_vacuum >= 1000 {
+                run_vacuum(db_client).await;
+                since_last_vacuum = 0;
             }
         }
     }
@@ -732,6 +964,7 @@ async fn delete_all_credex(
     if dry_run {
         println!("Dry run complete. No credential exchanges were deleted.");
     } else {
+        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 }
@@ -797,4 +1030,183 @@ async fn list_credex(
     for rec in records {
         println!("{}", rec.credential_exchange_id);
     }
+}
+
+async fn delete_all_oob(
+    token: Option<&str>,
+    api_key: Option<&str>,
+    base_url: &str,
+    batch_size: u32,
+    dry_run: bool,
+    db_client: Option<&tokio_postgres::Client>,
+) {
+    let client = build_client(token, api_key);
+    let mut total_deleted = 0u32;
+    let mut since_last_vacuum = 0u32;
+
+    loop {
+        let records = match get_oob_invitations(&client, base_url, batch_size, 0).await {
+            Ok(recs) => recs,
+            Err(e) => {
+                eprintln!("Failed to fetch OOB invitations: {}", e);
+                break;
+            }
+        };
+
+        if records.is_empty() {
+            println!("No more OOB invitation records found.");
+            break;
+        }
+
+        println!("Found {} OOB invitation record(s)", records.len());
+
+        if dry_run {
+            for rec in &records {
+                let state = rec.state.as_deref().unwrap_or("unknown");
+                let invi_msg_id = rec.invi_msg_id.as_deref().unwrap_or("N/A");
+                println!(
+                    "  [DRY-RUN] Would delete: {} (state={}, invi_msg_id={})",
+                    rec.oob_id, state, invi_msg_id
+                );
+            }
+        } else {
+            // Delete OOB invitations in parallel
+            let delete_futures: Vec<_> = records.iter().map(|rec| {
+                let client = &client;
+                async move {
+                    match delete_oob_invitation(client, base_url, &rec.oob_id).await {
+                        Ok(()) => {
+                            let state = rec.state.as_deref().unwrap_or("unknown");
+                            let invi_msg_id = rec.invi_msg_id.as_deref().unwrap_or("N/A");
+                            println!(
+                                "  Deleted: {} (state={}, invi_msg_id={})",
+                                rec.oob_id, state, invi_msg_id
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed to delete {}: {}", rec.oob_id, e);
+                            false
+                        }
+                    }
+                }
+            }).collect();
+            let results = join_all(delete_futures).await;
+            let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
+            total_deleted += batch_deleted;
+            since_last_vacuum += batch_deleted;
+            if since_last_vacuum >= 1000 {
+                run_vacuum(db_client).await;
+                since_last_vacuum = 0;
+            }
+        }
+    }
+
+    if dry_run {
+        println!("Dry run complete. No OOB invitations were deleted.");
+    } else {
+        run_vacuum(db_client).await;
+        println!("Done. Total deleted: {}", total_deleted);
+    }
+}
+
+async fn count_oob(
+    token: Option<&str>,
+    api_key: Option<&str>,
+    base_url: &str,
+    batch_size: u32,
+) {
+    let client = build_client(token, api_key);
+    let mut total_count = 0u32;
+    let mut offset = 0u32;
+
+    loop {
+        let records = match get_oob_invitations(&client, base_url, batch_size, offset).await {
+            Ok(recs) => recs,
+            Err(e) => {
+                eprintln!("Failed to fetch OOB invitations: {}", e);
+                break;
+            }
+        };
+
+        let batch_count = records.len() as u32;
+        if batch_count == 0 {
+            break;
+        }
+
+        total_count += batch_count;
+        offset += batch_count;
+
+        println!("Fetched {} records (total so far: {})", batch_count, total_count);
+
+        if batch_count < batch_size {
+            break;
+        }
+    }
+
+    println!("Total OOB invitation records: {}", total_count);
+}
+
+async fn list_oob(
+    token: Option<&str>,
+    api_key: Option<&str>,
+    base_url: &str,
+) {
+    let client = build_client(token, api_key);
+    let limit = 5;
+
+    let records = match get_oob_invitations(&client, base_url, limit, 0).await {
+        Ok(recs) => recs,
+        Err(e) => {
+            eprintln!("Failed to fetch OOB invitations: {}", e);
+            return;
+        }
+    };
+
+    for rec in records {
+        println!("{}", rec.oob_id);
+    }
+}
+
+async fn connect_db(connection: Option<&str>) -> Option<tokio_postgres::Client> {
+    let conn_str = connection?;
+    println!("Connecting to PostgreSQL (SSL)...");
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls = MakeRustlsConnect::new(tls_config);
+
+    match tokio_postgres::connect(conn_str, tls).await {
+        Ok((client, connection_task)) => {
+            tokio::spawn(async move {
+                if let Err(e) = connection_task.await {
+                    eprintln!("Database connection error: {}", e);
+                }
+            });
+            println!("Connected to PostgreSQL (SSL).");
+            Some(client)
+        }
+        Err(e) => {
+            eprintln!("Failed to connect to database: {}", e);
+            None
+        }
+    }
+}
+
+async fn run_vacuum(db_client: Option<&tokio_postgres::Client>) {
+    if let Some(client) = db_client {
+        println!("Running VACUUM ANALYZE...");
+        match client.batch_execute("VACUUM ANALYZE").await {
+            Ok(()) => println!("VACUUM ANALYZE completed."),
+            Err(e) => eprintln!("Failed to run VACUUM ANALYZE: {}", e),
+        }
+    }
+}
+
+async fn vacuum_analyze(connection: &str) {
+    let db_client = connect_db(Some(connection)).await;
+    run_vacuum(db_client.as_ref()).await;
 }

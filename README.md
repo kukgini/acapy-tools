@@ -17,6 +17,10 @@ Manage three record types — **connections**, **presentation exchanges**, and *
 | `credex list` | List credential exchange IDs (up to 5) |
 | `credex count` | Count all credential exchange records |
 | `credex delete` | Delete all credential exchange records |
+| `oob list` | List out-of-band invitation IDs (up to 5) |
+| `oob count` | Count all out-of-band invitation records |
+| `oob delete` | Delete all out-of-band invitation records |
+| `db vacuum` | Run VACUUM ANALYZE on PostgreSQL database |
 
 All delete commands support `--dry-run` to preview what would be deleted.
 
@@ -52,6 +56,7 @@ acapy-tools <command> <action> [options]
 | `-k, --api-key <KEY>` | API key for X-API-Key header |
 | `-b, --batch-size <N>` | Records per batch (default: 5) |
 | `-d, --dry-run` | Preview deletions without executing (delete commands only) |
+| `-c, --connection <CONN>` | PostgreSQL connection string (`db vacuum` only) |
 
 ### Examples
 
@@ -67,6 +72,9 @@ acapy-tools presex delete -t my-bearer-token
 
 # List credential exchange IDs with API key
 acapy-tools credex list -k my-api-key
+
+# Run VACUUM ANALYZE after bulk deletions
+acapy-tools db vacuum -c "host=localhost user=postgres dbname=acapy"
 ```
 
 ## License
