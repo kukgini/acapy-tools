@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use futures::future::join_all;
 use serde::Deserialize;
+use tokio_postgres::NoTls;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 #[derive(Parser, Debug)]
@@ -67,6 +68,10 @@ enum ConnectionCommands {
         /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
         #[arg(long)]
         db: Option<String>,
+
+        /// Skip TLS for PostgreSQL connection
+        #[arg(long)]
+        db_no_ssl: bool,
     },
     /// Count all connections using pagination
     Count {
@@ -129,6 +134,10 @@ enum PresexCommands {
         /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
         #[arg(long)]
         db: Option<String>,
+
+        /// Skip TLS for PostgreSQL connection
+        #[arg(long)]
+        db_no_ssl: bool,
     },
     /// Count all presentation exchange records using pagination
     Count {
@@ -191,6 +200,10 @@ enum CredexCommands {
         /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
         #[arg(long)]
         db: Option<String>,
+
+        /// Skip TLS for PostgreSQL connection
+        #[arg(long)]
+        db_no_ssl: bool,
     },
     /// Count all credential exchange records using pagination
     Count {
@@ -253,6 +266,10 @@ enum OobCommands {
         /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
         #[arg(long)]
         db: Option<String>,
+
+        /// Skip TLS for PostgreSQL connection
+        #[arg(long)]
+        db_no_ssl: bool,
     },
     /// Count all out-of-band invitations using pagination
     Count {
@@ -295,6 +312,10 @@ enum DbCommands {
         /// PostgreSQL connection string (e.g., "host=localhost user=postgres dbname=acapy")
         #[arg(short, long)]
         connection: String,
+
+        /// Skip TLS for PostgreSQL connection
+        #[arg(long)]
+        no_ssl: bool,
     },
 }
 
@@ -349,24 +370,31 @@ struct OobInvitationResponse {
     results: Vec<OobInvitation>,
 }
 
-fn build_client(token: Option<&str>, api_key: Option<&str>) -> reqwest::Client {
+fn build_client(token: Option<&str>, api_key: Option<&str>) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(t) = token {
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", t).parse().unwrap(),
+            format!("Bearer {}", t)
+                .parse()
+                .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                    format!("Invalid token value: {}", e)
+                })?,
         );
     }
     if let Some(key) = api_key {
         headers.insert(
             reqwest::header::HeaderName::from_static("x-api-key"),
-            key.parse().unwrap(),
+            key.parse()
+                .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                    format!("Invalid api-key value: {}", e)
+                })?,
         );
     }
     reqwest::Client::builder()
         .default_headers(headers)
         .build()
-        .unwrap()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
 async fn get_connections(
@@ -456,9 +484,9 @@ async fn get_oob_invitations(
 async fn delete_oob_invitation(
     client: &reqwest::Client,
     base_url: &str,
-    invi_msg_id: &str,
+    oob_id: &str,
 ) -> Result<(), reqwest::Error> {
-    let url = format!("{}/out-of-band/invitations/{}", base_url, invi_msg_id);
+    let url = format!("{}/out-of-band/invitations/{}", base_url, oob_id);
     client.delete(&url).send().await?.error_for_status()?;
     Ok(())
 }
@@ -467,7 +495,7 @@ async fn delete_oob_invitation(
 async fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Connection { action } => match action {
             ConnectionCommands::Delete {
                 token,
@@ -476,10 +504,11 @@ async fn main() {
                 batch_size,
                 dry_run,
                 db,
+                db_no_ssl,
             } => {
-                let db_client = connect_db(db.as_deref()).await;
+                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
                 delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
-                    .await;
+                    .await
             }
             ConnectionCommands::Count {
                 token,
@@ -487,14 +516,14 @@ async fn main() {
                 base_url,
                 batch_size,
             } => {
-                count_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await;
+                count_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await
             }
             ConnectionCommands::List {
                 token,
                 api_key,
                 base_url,
             } => {
-                list_connections(token.as_deref(), api_key.as_deref(), &base_url).await;
+                list_connections(token.as_deref(), api_key.as_deref(), &base_url).await
             }
         },
         Commands::Presex { action } => match action {
@@ -505,10 +534,11 @@ async fn main() {
                 batch_size,
                 dry_run,
                 db,
+                db_no_ssl,
             } => {
-                let db_client = connect_db(db.as_deref()).await;
+                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
                 delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
-                    .await;
+                    .await
             }
             PresexCommands::Count {
                 token,
@@ -516,14 +546,14 @@ async fn main() {
                 base_url,
                 batch_size,
             } => {
-                count_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await;
+                count_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await
             }
             PresexCommands::List {
                 token,
                 api_key,
                 base_url,
             } => {
-                list_presex(token.as_deref(), api_key.as_deref(), &base_url).await;
+                list_presex(token.as_deref(), api_key.as_deref(), &base_url).await
             }
         },
         Commands::Credex { action } => match action {
@@ -534,10 +564,11 @@ async fn main() {
                 batch_size,
                 dry_run,
                 db,
+                db_no_ssl,
             } => {
-                let db_client = connect_db(db.as_deref()).await;
+                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
                 delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
-                    .await;
+                    .await
             }
             CredexCommands::Count {
                 token,
@@ -545,14 +576,14 @@ async fn main() {
                 base_url,
                 batch_size,
             } => {
-                count_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await;
+                count_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await
             }
             CredexCommands::List {
                 token,
                 api_key,
                 base_url,
             } => {
-                list_credex(token.as_deref(), api_key.as_deref(), &base_url).await;
+                list_credex(token.as_deref(), api_key.as_deref(), &base_url).await
             }
         },
         Commands::Oob { action } => match action {
@@ -563,10 +594,11 @@ async fn main() {
                 batch_size,
                 dry_run,
                 db,
+                db_no_ssl,
             } => {
-                let db_client = connect_db(db.as_deref()).await;
+                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
                 delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, db_client.as_ref())
-                    .await;
+                    .await
             }
             OobCommands::Count {
                 token,
@@ -574,21 +606,26 @@ async fn main() {
                 base_url,
                 batch_size,
             } => {
-                count_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await;
+                count_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size).await
             }
             OobCommands::List {
                 token,
                 api_key,
                 base_url,
             } => {
-                list_oob(token.as_deref(), api_key.as_deref(), &base_url).await;
+                list_oob(token.as_deref(), api_key.as_deref(), &base_url).await
             }
         },
         Commands::Db { action } => match action {
-            DbCommands::Vacuum { connection } => {
-                vacuum_analyze(&connection).await;
+            DbCommands::Vacuum { connection, no_ssl } => {
+                vacuum_analyze(&connection, no_ssl).await
             }
         },
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 }
 
@@ -599,16 +636,18 @@ async fn delete_all_connections(
     batch_size: u32,
     dry_run: bool,
     db_client: Option<&tokio_postgres::Client>,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
     let mut since_last_vacuum = 0u32;
+    let mut had_error = false;
 
     loop {
         let connections = match get_connections(&client, base_url, batch_size, 0).await {
             Ok(conns) => conns,
             Err(e) => {
                 eprintln!("Failed to fetch connections: {}", e);
+                had_error = true;
                 break;
             }
         };
@@ -630,6 +669,7 @@ async fn delete_all_connections(
                     conn.connection_id, state, label, oob
                 );
             }
+            break;
         } else {
             // Delete OOB invitations in parallel
             let oob_futures: Vec<_> = connections.iter()
@@ -667,6 +707,10 @@ async fn delete_all_connections(
             let results = join_all(delete_futures).await;
             let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
             total_deleted += batch_deleted;
+            if batch_deleted == 0 {
+                eprintln!("Warning: no records deleted in this batch. Stopping.");
+                break;
+            }
             since_last_vacuum += batch_deleted;
             if since_last_vacuum >= 1000 {
                 run_vacuum(db_client).await;
@@ -681,6 +725,8 @@ async fn delete_all_connections(
         run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
+
+    if had_error { Err("Failed to complete connection deletion".to_string()) } else { Ok(()) }
 }
 
 async fn count_connections(
@@ -688,8 +734,8 @@ async fn count_connections(
     api_key: Option<&str>,
     base_url: &str,
     batch_size: u32,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_count = 0u32;
     let mut offset = 0u32;
 
@@ -697,8 +743,7 @@ async fn count_connections(
         let records = match get_connections(&client, base_url, batch_size, offset).await {
             Ok(recs) => recs,
             Err(e) => {
-                eprintln!("Failed to fetch connections: {}", e);
-                break;
+                return Err(format!("Failed to fetch connections: {}", e));
             }
         };
 
@@ -718,6 +763,7 @@ async fn count_connections(
     }
 
     println!("Total connection records: {}", total_count);
+    Ok(())
 }
 
 async fn delete_all_presex(
@@ -727,16 +773,18 @@ async fn delete_all_presex(
     batch_size: u32,
     dry_run: bool,
     db_client: Option<&tokio_postgres::Client>,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
     let mut since_last_vacuum = 0u32;
+    let mut had_error = false;
 
     loop {
         let records = match get_presentation_exchanges(&client, base_url, batch_size, 0).await {
             Ok(recs) => recs,
             Err(e) => {
                 eprintln!("Failed to fetch presentation exchanges: {}", e);
+                had_error = true;
                 break;
             }
         };
@@ -758,6 +806,7 @@ async fn delete_all_presex(
                     rec.presentation_exchange_id, state, conn_id, oob
                 );
             }
+            break;
         } else {
             // Delete OOB invitations in parallel
             let oob_futures: Vec<_> = records.iter()
@@ -795,6 +844,10 @@ async fn delete_all_presex(
             let results = join_all(delete_futures).await;
             let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
             total_deleted += batch_deleted;
+            if batch_deleted == 0 {
+                eprintln!("Warning: no records deleted in this batch. Stopping.");
+                break;
+            }
             since_last_vacuum += batch_deleted;
             if since_last_vacuum >= 1000 {
                 run_vacuum(db_client).await;
@@ -809,6 +862,8 @@ async fn delete_all_presex(
         run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
+
+    if had_error { Err("Failed to complete presex deletion".to_string()) } else { Ok(()) }
 }
 
 async fn count_presex(
@@ -816,8 +871,8 @@ async fn count_presex(
     api_key: Option<&str>,
     base_url: &str,
     batch_size: u32,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_count = 0u32;
     let mut offset = 0u32;
 
@@ -825,8 +880,7 @@ async fn count_presex(
         let records = match get_presentation_exchanges(&client, base_url, batch_size, offset).await {
             Ok(recs) => recs,
             Err(e) => {
-                eprintln!("Failed to fetch presentation exchanges: {}", e);
-                break;
+                return Err(format!("Failed to fetch presentation exchanges: {}", e));
             }
         };
 
@@ -846,6 +900,7 @@ async fn count_presex(
     }
 
     println!("Total presentation exchange records: {}", total_count);
+    Ok(())
 }
 
 async fn count_credex(
@@ -853,8 +908,8 @@ async fn count_credex(
     api_key: Option<&str>,
     base_url: &str,
     batch_size: u32,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_count = 0u32;
     let mut offset = 0u32;
 
@@ -862,8 +917,7 @@ async fn count_credex(
         let records = match get_credential_exchanges(&client, base_url, batch_size, offset).await {
             Ok(recs) => recs,
             Err(e) => {
-                eprintln!("Failed to fetch credential exchanges: {}", e);
-                break;
+                return Err(format!("Failed to fetch credential exchanges: {}", e));
             }
         };
 
@@ -883,6 +937,7 @@ async fn count_credex(
     }
 
     println!("Total credential exchange records: {}", total_count);
+    Ok(())
 }
 
 async fn delete_all_credex(
@@ -892,16 +947,18 @@ async fn delete_all_credex(
     batch_size: u32,
     dry_run: bool,
     db_client: Option<&tokio_postgres::Client>,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
     let mut since_last_vacuum = 0u32;
+    let mut had_error = false;
 
     loop {
         let records = match get_credential_exchanges(&client, base_url, batch_size, 0).await {
             Ok(recs) => recs,
             Err(e) => {
                 eprintln!("Failed to fetch credential exchanges: {}", e);
+                had_error = true;
                 break;
             }
         };
@@ -921,6 +978,7 @@ async fn delete_all_credex(
                     rec.credential_exchange_id, oob
                 );
             }
+            break;
         } else {
             // Delete OOB invitations in parallel
             let oob_futures: Vec<_> = records.iter()
@@ -953,6 +1011,10 @@ async fn delete_all_credex(
             let results = join_all(delete_futures).await;
             let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
             total_deleted += batch_deleted;
+            if batch_deleted == 0 {
+                eprintln!("Warning: no records deleted in this batch. Stopping.");
+                break;
+            }
             since_last_vacuum += batch_deleted;
             if since_last_vacuum >= 1000 {
                 run_vacuum(db_client).await;
@@ -967,69 +1029,71 @@ async fn delete_all_credex(
         run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
+
+    if had_error { Err("Failed to complete credex deletion".to_string()) } else { Ok(()) }
 }
 
 async fn list_connections(
     token: Option<&str>,
     api_key: Option<&str>,
     base_url: &str,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let limit = 5;
 
     let connections = match get_connections(&client, base_url, limit, 0).await {
         Ok(conns) => conns,
         Err(e) => {
-            eprintln!("Failed to fetch connections: {}", e);
-            return;
+            return Err(format!("Failed to fetch connections: {}", e));
         }
     };
 
     for conn in connections {
         println!("{}", conn.connection_id);
     }
+    Ok(())
 }
 
 async fn list_presex(
     token: Option<&str>,
     api_key: Option<&str>,
     base_url: &str,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let limit = 5;
 
     let records = match get_presentation_exchanges(&client, base_url, limit, 0).await {
         Ok(recs) => recs,
         Err(e) => {
-            eprintln!("Failed to fetch presentation exchanges: {}", e);
-            return;
+            return Err(format!("Failed to fetch presentation exchanges: {}", e));
         }
     };
 
     for rec in records {
         println!("{}", rec.presentation_exchange_id);
     }
+    Ok(())
 }
 
 async fn list_credex(
     token: Option<&str>,
     api_key: Option<&str>,
     base_url: &str,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let limit = 5;
 
     let records = match get_credential_exchanges(&client, base_url, limit, 0).await {
         Ok(recs) => recs,
         Err(e) => {
-            eprintln!("Failed to fetch credential exchanges: {}", e);
-            return;
+            return Err(format!("Failed to fetch credential exchanges: {}", e));
         }
     };
 
     for rec in records {
         println!("{}", rec.credential_exchange_id);
     }
+    Ok(())
 }
 
 async fn delete_all_oob(
@@ -1039,16 +1103,18 @@ async fn delete_all_oob(
     batch_size: u32,
     dry_run: bool,
     db_client: Option<&tokio_postgres::Client>,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
     let mut since_last_vacuum = 0u32;
+    let mut had_error = false;
 
     loop {
         let records = match get_oob_invitations(&client, base_url, batch_size, 0).await {
             Ok(recs) => recs,
             Err(e) => {
                 eprintln!("Failed to fetch OOB invitations: {}", e);
+                had_error = true;
                 break;
             }
         };
@@ -1069,6 +1135,7 @@ async fn delete_all_oob(
                     rec.oob_id, state, invi_msg_id
                 );
             }
+            break;
         } else {
             // Delete OOB invitations in parallel
             let delete_futures: Vec<_> = records.iter().map(|rec| {
@@ -1094,6 +1161,10 @@ async fn delete_all_oob(
             let results = join_all(delete_futures).await;
             let batch_deleted = results.iter().filter(|&&ok| ok).count() as u32;
             total_deleted += batch_deleted;
+            if batch_deleted == 0 {
+                eprintln!("Warning: no records deleted in this batch. Stopping.");
+                break;
+            }
             since_last_vacuum += batch_deleted;
             if since_last_vacuum >= 1000 {
                 run_vacuum(db_client).await;
@@ -1108,6 +1179,8 @@ async fn delete_all_oob(
         run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
+
+    if had_error { Err("Failed to complete OOB deletion".to_string()) } else { Ok(()) }
 }
 
 async fn count_oob(
@@ -1115,8 +1188,8 @@ async fn count_oob(
     api_key: Option<&str>,
     base_url: &str,
     batch_size: u32,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let mut total_count = 0u32;
     let mut offset = 0u32;
 
@@ -1124,8 +1197,7 @@ async fn count_oob(
         let records = match get_oob_invitations(&client, base_url, batch_size, offset).await {
             Ok(recs) => recs,
             Err(e) => {
-                eprintln!("Failed to fetch OOB invitations: {}", e);
-                break;
+                return Err(format!("Failed to fetch OOB invitations: {}", e));
             }
         };
 
@@ -1145,53 +1217,72 @@ async fn count_oob(
     }
 
     println!("Total OOB invitation records: {}", total_count);
+    Ok(())
 }
 
 async fn list_oob(
     token: Option<&str>,
     api_key: Option<&str>,
     base_url: &str,
-) {
-    let client = build_client(token, api_key);
+) -> Result<(), String> {
+    let client = build_client(token, api_key)?;
     let limit = 5;
 
     let records = match get_oob_invitations(&client, base_url, limit, 0).await {
         Ok(recs) => recs,
         Err(e) => {
-            eprintln!("Failed to fetch OOB invitations: {}", e);
-            return;
+            return Err(format!("Failed to fetch OOB invitations: {}", e));
         }
     };
 
     for rec in records {
         println!("{}", rec.oob_id);
     }
+    Ok(())
 }
 
-async fn connect_db(connection: Option<&str>) -> Option<tokio_postgres::Client> {
+async fn connect_db(connection: Option<&str>, no_ssl: bool) -> Option<tokio_postgres::Client> {
     let conn_str = connection?;
-    println!("Connecting to PostgreSQL (SSL)...");
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let tls = MakeRustlsConnect::new(tls_config);
-
-    match tokio_postgres::connect(conn_str, tls).await {
-        Ok((client, connection_task)) => {
-            tokio::spawn(async move {
-                if let Err(e) = connection_task.await {
-                    eprintln!("Database connection error: {}", e);
-                }
-            });
-            println!("Connected to PostgreSQL (SSL).");
-            Some(client)
+    if no_ssl {
+        println!("Connecting to PostgreSQL...");
+        match tokio_postgres::connect(conn_str, NoTls).await {
+            Ok((client, connection_task)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection_task.await {
+                        eprintln!("Database connection error: {}", e);
+                    }
+                });
+                println!("Connected to PostgreSQL.");
+                Some(client)
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to database: {}", e);
+                None
+            }
         }
-        Err(e) => {
-            eprintln!("Failed to connect to database: {}", e);
-            None
+    } else {
+        println!("Connecting to PostgreSQL (SSL)...");
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let tls = MakeRustlsConnect::new(tls_config);
+        match tokio_postgres::connect(conn_str, tls).await {
+            Ok((client, connection_task)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection_task.await {
+                        eprintln!("Database connection error: {}", e);
+                    }
+                });
+                println!("Connected to PostgreSQL (SSL).");
+                Some(client)
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to database: {}", e);
+                None
+            }
         }
     }
 }
@@ -1206,7 +1297,11 @@ async fn run_vacuum(db_client: Option<&tokio_postgres::Client>) {
     }
 }
 
-async fn vacuum_analyze(connection: &str) {
-    let db_client = connect_db(Some(connection)).await;
+async fn vacuum_analyze(connection: &str, no_ssl: bool) -> Result<(), String> {
+    let db_client = connect_db(Some(connection), no_ssl).await;
+    if db_client.is_none() {
+        return Err("Failed to connect to database".to_string());
+    }
     run_vacuum(db_client.as_ref()).await;
+    Ok(())
 }
