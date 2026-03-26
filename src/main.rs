@@ -1,9 +1,8 @@
-use aries_askar::{Store, StoreKeyMethod, entry::Entry};
+use aries_askar::{Store, StoreKeyMethod};
 use aries_askar::storage::{Argon2Level, KdfMethod};
 use clap::{Parser, Subcommand};
 use futures::future::join_all;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Parser, Debug)]
 #[command(name = "acapy-tools")]
@@ -1252,15 +1251,25 @@ async fn list_oob(
     Ok(())
 }
 
-async fn open_store_from_env(wallet_name_override: Option<&str>) -> Result<Store, String> {
+async fn open_store_from_env(wallet_name_override: Option<&str>, is_tenant: bool) -> Result<Store, String> {
     let storage_config = std::env::var("ACAPY_WALLET_STORAGE_CONFIG")
         .map_err(|_| "ACAPY_WALLET_STORAGE_CONFIG is not set".to_string())?;
     let storage_creds = std::env::var("ACAPY_WALLET_STORAGE_CREDS")
         .map_err(|_| "ACAPY_WALLET_STORAGE_CREDS is not set".to_string())?;
-    let wallet_name = match wallet_name_override {
-        Some(name) => name.to_string(),
-        None => std::env::var("ACAPY_WALLET_NAME")
-            .map_err(|_| "ACAPY_WALLET_NAME is not set".to_string())?,
+    let wallet_name = if let Some(name) = wallet_name_override {
+        name.to_string()
+    } else if is_tenant {
+        let mt_config = std::env::var("ACAPY_MULTITENANCY_CONFIGURATION")
+            .map_err(|_| "ACAPY_MULTITENANCY_CONFIGURATION is not set".to_string())?;
+        let mt: serde_json::Value = serde_json::from_str(&mt_config)
+            .map_err(|e| format!("Failed to parse ACAPY_MULTITENANCY_CONFIGURATION: {}", e))?;
+        mt["wallet_name"]
+            .as_str()
+            .ok_or("ACAPY_MULTITENANCY_CONFIGURATION missing 'wallet_name' field")?
+            .to_string()
+    } else {
+        std::env::var("ACAPY_WALLET_NAME")
+            .map_err(|_| "ACAPY_WALLET_NAME is not set".to_string())?
     };
     let wallet_key = std::env::var("ACAPY_WALLET_KEY")
         .map_err(|_| "ACAPY_WALLET_KEY is not set".to_string())?;
@@ -1296,7 +1305,7 @@ async fn open_store_from_env(wallet_name_override: Option<&str>) -> Result<Store
         _ => StoreKeyMethod::DeriveKey(KdfMethod::Argon2i(Argon2Level::Moderate)),
     };
 
-    println!("Opening Askar store...");
+    println!("Opening Askar store (db={}, key_method={})...", wallet_name, key_derivation);
     let store = Store::open(&store_url, Some(key_method), wallet_key.into(), None)
         .await
         .map_err(|e| format!("Failed to open store: {}", e))?;
@@ -1305,7 +1314,7 @@ async fn open_store_from_env(wallet_name_override: Option<&str>) -> Result<Store
 }
 
 async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
-    let store = open_store_from_env(wallet_name).await?;
+    let store = open_store_from_env(wallet_name, false).await?;
     let profiles = store
         .list_profiles()
         .await
@@ -1318,45 +1327,68 @@ async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Known ACA-Py record categories (RECORD_TYPE values from ACA-Py models)
+const KNOWN_CATEGORIES: &[&str] = &[
+    // Connections
+    "connection",
+    // Out-of-Band
+    "oob-invitation",
+    // Issue Credential v1.0 / v2.0
+    "credential_exchange_v10",
+    "issue-cred-v2.0",
+    // Present Proof v1.0 / v2.0
+    "presentation_exchange_v10",
+    "present-proof-v2.0",
+    // Revocation
+    "issuer_cred_rev",
+    "issuer_rev_reg",
+    // DID Exchange
+    "did",
+    "did_doc",
+    // Mediation / Routing
+    "mediation_request",
+    "route_record",
+    "default_mediator",
+    "keylist_update_rule",
+    // Endorsement
+    "endorse_transaction",
+    // Basic Message
+    "basicmessage",
+    // Discover Features
+    "discovery_record",
+    // Action Menu
+    "menu",
+];
+
 async fn db_list_categories(wallet_name: Option<&str>, profile: Option<&str>) -> Result<(), String> {
-    let store = open_store_from_env(wallet_name).await?;
-    let mut scan = store
-        .scan(profile.map(|s| s.to_string()), None, None, None, None, None, false)
+    let store = open_store_from_env(wallet_name, profile.is_some()).await?;
+    let mut session = store
+        .session(profile.map(|s| s.to_string()))
         .await
-        .map_err(|e| format!("Failed to start scan: {}", e))?;
-
-    let mut category_counts: HashMap<String, usize> = HashMap::new();
-    loop {
-        let entries: Option<Vec<Entry>> = scan
-            .fetch_next()
-            .await
-            .map_err(|e| format!("Failed to fetch scan results: {}", e))?;
-        match entries {
-            Some(batch) if !batch.is_empty() => {
-                for entry in &batch {
-                    *category_counts.entry(entry.category.clone()).or_insert(0) += 1;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let mut categories: Vec<_> = category_counts.into_iter().collect();
-    categories.sort_by(|a, b| b.1.cmp(&a.1));
+        .map_err(|e| format!("Failed to open session: {}", e))?;
 
     let profile_label = profile.unwrap_or("default");
     println!("Categories in profile '{}':", profile_label);
-    for (category, count) in &categories {
-        println!("  {} ({})", category, count);
+
+    let mut found = 0usize;
+    for category in KNOWN_CATEGORIES {
+        let count = session
+            .count(Some(category), None)
+            .await
+            .map_err(|e| format!("Failed to count category '{}': {}", category, e))?;
+        if count > 0 {
+            println!("  {} ({})", category, count);
+            found += 1;
+        }
     }
-    println!("Total: {} categories", categories.len());
+    println!("Total: {} categories found", found);
 
     store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
 async fn db_count(wallet_name: Option<&str>, profile: Option<&str>, category: &str) -> Result<(), String> {
-    let store = open_store_from_env(wallet_name).await?;
+    let store = open_store_from_env(wallet_name, profile.is_some()).await?;
     let mut session = store
         .session(profile.map(|s| s.to_string()))
         .await
@@ -1375,7 +1407,7 @@ async fn db_count(wallet_name: Option<&str>, profile: Option<&str>, category: &s
 }
 
 async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &str, dry_run: bool) -> Result<(), String> {
-    let store = open_store_from_env(wallet_name).await?;
+    let store = open_store_from_env(wallet_name, profile.is_some()).await?;
     let mut session = store
         .session(profile.map(|s| s.to_string()))
         .await
