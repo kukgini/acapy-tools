@@ -1327,7 +1327,7 @@ async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Known ACA-Py record categories (RECORD_TYPE values from ACA-Py models)
+/// Known ACA-Py record categories (RECORD_TYPE values from 0.8.2 through 1.5.x)
 const KNOWN_CATEGORIES: &[&str] = &[
     // Connections
     "connection",
@@ -1337,9 +1337,9 @@ const KNOWN_CATEGORIES: &[&str] = &[
     // Issue Credential v1.0 / v2.0
     "credential_exchange_v10",
     "cred_ex_v20",
-    "anoncreds_cred_ex_v20",
     "indy_cred_ex_v20",
     "ld_proof_cred_ex_v20",
+    "anoncreds_cred_ex_v20",
     // Present Proof v1.0 / v2.0
     "presentation_exchange_v10",
     "pres_ex_v20",
