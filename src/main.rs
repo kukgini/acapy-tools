@@ -1334,18 +1334,22 @@ const KNOWN_CATEGORIES: &[&str] = &[
     // Out-of-Band
     "oob_invitation",
     "oob_record",
-    // Issue Credential v2.0
+    // Issue Credential v1.0 / v2.0
+    "credential_exchange_v10",
     "cred_ex_v20",
     "anoncreds_cred_ex_v20",
     "indy_cred_ex_v20",
     "ld_proof_cred_ex_v20",
-    // Present Proof v2.0
+    // Present Proof v1.0 / v2.0
+    "presentation_exchange_v10",
     "pres_ex_v20",
     // Revocation
     "issuer_cred_rev",
     "issuer_rev_reg",
     "revocation_notification",
     // DID
+    "did",
+    "did_doc",
     "did_rotate",
     "long_peer_did_4_doc",
     // Mediation / Routing
