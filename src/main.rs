@@ -1327,7 +1327,7 @@ async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Known ACA-Py record categories (RECORD_TYPE values from 0.8.2 through 1.5.x)
+/// Known ACA-Py record categories (0.8.2 through 1.5.x)
 const KNOWN_CATEGORIES: &[&str] = &[
     // Connections
     "connection",
@@ -1343,15 +1343,33 @@ const KNOWN_CATEGORIES: &[&str] = &[
     // Present Proof v1.0 / v2.0
     "presentation_exchange_v10",
     "pres_ex_v20",
-    // Revocation
+    // Revocation (protocol records)
     "issuer_cred_rev",
     "issuer_rev_reg",
     "revocation_notification",
-    // DID
+    // Revocation (anoncreds/indy storage)
+    "revocation_reg",
+    "revocation_reg_def",
+    "revocation_reg_def_private",
+    "revocation_reg_def_issuer",
+    "revocation_reg_info",
+    "revocation_list",
+    // DID / Keys
     "did",
     "did_doc",
+    "did_key",
     "did_rotate",
     "long_peer_did_4_doc",
+    // Wallet / Credentials (anoncreds/indy storage)
+    "credential",
+    "credential_def",
+    "credential_def_private",
+    "credential_def_key_proof",
+    "schema",
+    "master_secret",
+    "config",
+    // Askar internal
+    "cryptokey",
     // Mediation / Routing
     "mediation_requests",
     "forward_route",
