@@ -293,20 +293,32 @@ enum OobCommands {
 #[derive(Subcommand, Debug)]
 enum DbCommands {
     /// List all wallet profiles (tenants)
-    ListProfiles,
+    ListProfiles {
+        /// Override wallet database name (for DatabasePerWallet tenant access)
+        #[arg(long)]
+        wallet_name: Option<String>,
+    },
 
     /// List unique record categories in a profile
     ListCategories {
-        /// Wallet profile name (tenant)
+        /// Override wallet database name (for DatabasePerWallet tenant access)
         #[arg(long)]
-        profile: String,
+        wallet_name: Option<String>,
+
+        /// Wallet profile name (for MultiWalletSingleTable)
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Count records by category in a profile
     Count {
-        /// Wallet profile name (tenant)
+        /// Override wallet database name (for DatabasePerWallet tenant access)
         #[arg(long)]
-        profile: String,
+        wallet_name: Option<String>,
+
+        /// Wallet profile name (for MultiWalletSingleTable)
+        #[arg(long)]
+        profile: Option<String>,
 
         /// Record category (e.g., "connection", "oob_record")
         #[arg(long)]
@@ -315,9 +327,13 @@ enum DbCommands {
 
     /// Delete all records of a category in a profile
     Delete {
-        /// Wallet profile name (tenant)
+        /// Override wallet database name (for DatabasePerWallet tenant access)
         #[arg(long)]
-        profile: String,
+        wallet_name: Option<String>,
+
+        /// Wallet profile name (for MultiWalletSingleTable)
+        #[arg(long)]
+        profile: Option<String>,
 
         /// Record category (e.g., "connection", "oob_record")
         #[arg(long)]
@@ -623,17 +639,17 @@ async fn main() {
             }
         },
         Commands::Db { action } => match action {
-            DbCommands::ListProfiles => {
-                db_list_profiles().await
+            DbCommands::ListProfiles { wallet_name } => {
+                db_list_profiles(wallet_name.as_deref()).await
             }
-            DbCommands::ListCategories { profile } => {
-                db_list_categories(&profile).await
+            DbCommands::ListCategories { wallet_name, profile } => {
+                db_list_categories(wallet_name.as_deref(), profile.as_deref()).await
             }
-            DbCommands::Count { profile, category } => {
-                db_count(&profile, &category).await
+            DbCommands::Count { wallet_name, profile, category } => {
+                db_count(wallet_name.as_deref(), profile.as_deref(), &category).await
             }
-            DbCommands::Delete { profile, category, dry_run } => {
-                db_delete(&profile, &category, dry_run).await
+            DbCommands::Delete { wallet_name, profile, category, dry_run } => {
+                db_delete(wallet_name.as_deref(), profile.as_deref(), &category, dry_run).await
             }
         },
     };
@@ -1236,13 +1252,16 @@ async fn list_oob(
     Ok(())
 }
 
-async fn open_store_from_env() -> Result<Store, String> {
+async fn open_store_from_env(wallet_name_override: Option<&str>) -> Result<Store, String> {
     let storage_config = std::env::var("ACAPY_WALLET_STORAGE_CONFIG")
         .map_err(|_| "ACAPY_WALLET_STORAGE_CONFIG is not set".to_string())?;
     let storage_creds = std::env::var("ACAPY_WALLET_STORAGE_CREDS")
         .map_err(|_| "ACAPY_WALLET_STORAGE_CREDS is not set".to_string())?;
-    let wallet_name = std::env::var("ACAPY_WALLET_NAME")
-        .map_err(|_| "ACAPY_WALLET_NAME is not set".to_string())?;
+    let wallet_name = match wallet_name_override {
+        Some(name) => name.to_string(),
+        None => std::env::var("ACAPY_WALLET_NAME")
+            .map_err(|_| "ACAPY_WALLET_NAME is not set".to_string())?,
+    };
     let wallet_key = std::env::var("ACAPY_WALLET_KEY")
         .map_err(|_| "ACAPY_WALLET_KEY is not set".to_string())?;
     let key_derivation = std::env::var("ACAPY_WALLET_KEY_DERIVATION_METHOD")
@@ -1285,8 +1304,8 @@ async fn open_store_from_env() -> Result<Store, String> {
     Ok(store)
 }
 
-async fn db_list_profiles() -> Result<(), String> {
-    let store = open_store_from_env().await?;
+async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
+    let store = open_store_from_env(wallet_name).await?;
     let profiles = store
         .list_profiles()
         .await
@@ -1299,10 +1318,10 @@ async fn db_list_profiles() -> Result<(), String> {
     Ok(())
 }
 
-async fn db_list_categories(profile: &str) -> Result<(), String> {
-    let store = open_store_from_env().await?;
+async fn db_list_categories(wallet_name: Option<&str>, profile: Option<&str>) -> Result<(), String> {
+    let store = open_store_from_env(wallet_name).await?;
     let mut scan = store
-        .scan(Some(profile.to_string()), None, None, None, None, None, false)
+        .scan(profile.map(|s| s.to_string()), None, None, None, None, None, false)
         .await
         .map_err(|e| format!("Failed to start scan: {}", e))?;
 
@@ -1325,7 +1344,8 @@ async fn db_list_categories(profile: &str) -> Result<(), String> {
     let mut categories: Vec<_> = category_counts.into_iter().collect();
     categories.sort_by(|a, b| b.1.cmp(&a.1));
 
-    println!("Categories in profile '{}':", profile);
+    let profile_label = profile.unwrap_or("default");
+    println!("Categories in profile '{}':", profile_label);
     for (category, count) in &categories {
         println!("  {} ({})", category, count);
     }
@@ -1335,10 +1355,10 @@ async fn db_list_categories(profile: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn db_count(profile: &str, category: &str) -> Result<(), String> {
-    let store = open_store_from_env().await?;
+async fn db_count(wallet_name: Option<&str>, profile: Option<&str>, category: &str) -> Result<(), String> {
+    let store = open_store_from_env(wallet_name).await?;
     let mut session = store
-        .session(Some(profile.to_string()))
+        .session(profile.map(|s| s.to_string()))
         .await
         .map_err(|e| format!("Failed to open session: {}", e))?;
 
@@ -1347,16 +1367,17 @@ async fn db_count(profile: &str, category: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to count records: {}", e))?;
 
-    println!("Profile '{}', category '{}': {} records", profile, category, count);
+    let profile_label = profile.unwrap_or("default");
+    println!("Profile '{}', category '{}': {} records", profile_label, category, count);
 
     store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
-async fn db_delete(profile: &str, category: &str, dry_run: bool) -> Result<(), String> {
-    let store = open_store_from_env().await?;
+async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &str, dry_run: bool) -> Result<(), String> {
+    let store = open_store_from_env(wallet_name).await?;
     let mut session = store
-        .session(Some(profile.to_string()))
+        .session(profile.map(|s| s.to_string()))
         .await
         .map_err(|e| format!("Failed to open session: {}", e))?;
 
@@ -1365,16 +1386,18 @@ async fn db_delete(profile: &str, category: &str, dry_run: bool) -> Result<(), S
         .await
         .map_err(|e| format!("Failed to count records: {}", e))?;
 
+    let profile_label = profile.unwrap_or("default");
+
     if count == 0 {
-        println!("No records found for category '{}' in profile '{}'.", category, profile);
+        println!("No records found for category '{}' in profile '{}'.", category, profile_label);
         store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
         return Ok(());
     }
 
     if dry_run {
-        println!("[DRY-RUN] Would delete {} record(s) of category '{}' in profile '{}'.", count, category, profile);
+        println!("[DRY-RUN] Would delete {} record(s) of category '{}' in profile '{}'.", count, category, profile_label);
     } else {
-        println!("Deleting {} record(s) of category '{}' in profile '{}'...", count, category, profile);
+        println!("Deleting {} record(s) of category '{}' in profile '{}'...", count, category, profile_label);
         session
             .remove_all(Some(category), None)
             .await
