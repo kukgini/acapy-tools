@@ -1,8 +1,9 @@
+use aries_askar::{Store, StoreKeyMethod, entry::Entry};
+use aries_askar::storage::{Argon2Level, KdfMethod};
 use clap::{Parser, Subcommand};
 use futures::future::join_all;
 use serde::Deserialize;
-use tokio_postgres::NoTls;
-use tokio_postgres_rustls::MakeRustlsConnect;
+use std::collections::HashMap;
 
 #[derive(Parser, Debug)]
 #[command(name = "acapy-tools")]
@@ -64,14 +65,6 @@ enum ConnectionCommands {
         /// Show records without deleting
         #[arg(short, long)]
         dry_run: bool,
-
-        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
-        #[arg(long)]
-        db: Option<String>,
-
-        /// Skip TLS for PostgreSQL connection
-        #[arg(long)]
-        db_no_ssl: bool,
 
         /// Print each deletion result
         #[arg(short, long)]
@@ -135,14 +128,6 @@ enum PresexCommands {
         #[arg(short, long)]
         dry_run: bool,
 
-        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
-        #[arg(long)]
-        db: Option<String>,
-
-        /// Skip TLS for PostgreSQL connection
-        #[arg(long)]
-        db_no_ssl: bool,
-
         /// Print each deletion result
         #[arg(short, long)]
         verbose: bool,
@@ -204,14 +189,6 @@ enum CredexCommands {
         /// Show records without deleting
         #[arg(short, long)]
         dry_run: bool,
-
-        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
-        #[arg(long)]
-        db: Option<String>,
-
-        /// Skip TLS for PostgreSQL connection
-        #[arg(long)]
-        db_no_ssl: bool,
 
         /// Print each deletion result
         #[arg(short, long)]
@@ -275,14 +252,6 @@ enum OobCommands {
         #[arg(short, long)]
         dry_run: bool,
 
-        /// PostgreSQL connection string for auto VACUUM ANALYZE after each batch
-        #[arg(long)]
-        db: Option<String>,
-
-        /// Skip TLS for PostgreSQL connection
-        #[arg(long)]
-        db_no_ssl: bool,
-
         /// Print each deletion result
         #[arg(short, long)]
         verbose: bool,
@@ -323,15 +292,40 @@ enum OobCommands {
 
 #[derive(Subcommand, Debug)]
 enum DbCommands {
-    /// Run VACUUM ANALYZE on the database
-    Vacuum {
-        /// PostgreSQL connection string (e.g., "host=localhost user=postgres dbname=acapy")
-        #[arg(short, long)]
-        connection: String,
+    /// List all wallet profiles (tenants)
+    ListProfiles,
 
-        /// Skip TLS for PostgreSQL connection
+    /// List unique record categories in a profile
+    ListCategories {
+        /// Wallet profile name (tenant)
         #[arg(long)]
-        no_ssl: bool,
+        profile: String,
+    },
+
+    /// Count records by category in a profile
+    Count {
+        /// Wallet profile name (tenant)
+        #[arg(long)]
+        profile: String,
+
+        /// Record category (e.g., "connection", "oob_record")
+        #[arg(long)]
+        category: String,
+    },
+
+    /// Delete all records of a category in a profile
+    Delete {
+        /// Wallet profile name (tenant)
+        #[arg(long)]
+        profile: String,
+
+        /// Record category (e.g., "connection", "oob_record")
+        #[arg(long)]
+        category: String,
+
+        /// Show what would be deleted without actually deleting
+        #[arg(short, long)]
+        dry_run: bool,
     },
 }
 
@@ -523,12 +517,9 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
-                db,
-                db_no_ssl,
                 verbose,
             } => {
-                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
+                delete_all_connections(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose)
                     .await
             }
             ConnectionCommands::Count {
@@ -554,12 +545,9 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
-                db,
-                db_no_ssl,
                 verbose,
             } => {
-                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
+                delete_all_presex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose)
                     .await
             }
             PresexCommands::Count {
@@ -585,12 +573,9 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
-                db,
-                db_no_ssl,
                 verbose,
             } => {
-                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
+                delete_all_credex(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose)
                     .await
             }
             CredexCommands::Count {
@@ -616,12 +601,9 @@ async fn main() {
                 base_url,
                 batch_size,
                 dry_run,
-                db,
-                db_no_ssl,
                 verbose,
             } => {
-                let db_client = connect_db(db.as_deref(), db_no_ssl).await;
-                delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose, db_client.as_ref())
+                delete_all_oob(token.as_deref(), api_key.as_deref(), &base_url, batch_size, dry_run, verbose)
                     .await
             }
             OobCommands::Count {
@@ -641,8 +623,17 @@ async fn main() {
             }
         },
         Commands::Db { action } => match action {
-            DbCommands::Vacuum { connection, no_ssl } => {
-                vacuum_analyze(&connection, no_ssl).await
+            DbCommands::ListProfiles => {
+                db_list_profiles().await
+            }
+            DbCommands::ListCategories { profile } => {
+                db_list_categories(&profile).await
+            }
+            DbCommands::Count { profile, category } => {
+                db_count(&profile, &category).await
+            }
+            DbCommands::Delete { profile, category, dry_run } => {
+                db_delete(&profile, &category, dry_run).await
             }
         },
     };
@@ -660,11 +651,9 @@ async fn delete_all_connections(
     batch_size: u32,
     dry_run: bool,
     verbose: bool,
-    db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
-    let mut since_last_vacuum = 0u32;
     let mut had_error = false;
 
     loop {
@@ -738,18 +727,12 @@ async fn delete_all_connections(
                 eprintln!("Warning: no records deleted in this batch. Stopping.");
                 break;
             }
-            since_last_vacuum += batch_deleted;
-            if since_last_vacuum >= 1000 {
-                run_vacuum(db_client).await;
-                since_last_vacuum = 0;
-            }
         }
     }
 
     if dry_run {
         println!("Dry run complete. No connections were deleted.");
     } else {
-        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 
@@ -800,11 +783,9 @@ async fn delete_all_presex(
     batch_size: u32,
     dry_run: bool,
     verbose: bool,
-    db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
-    let mut since_last_vacuum = 0u32;
     let mut had_error = false;
 
     loop {
@@ -878,18 +859,12 @@ async fn delete_all_presex(
                 eprintln!("Warning: no records deleted in this batch. Stopping.");
                 break;
             }
-            since_last_vacuum += batch_deleted;
-            if since_last_vacuum >= 1000 {
-                run_vacuum(db_client).await;
-                since_last_vacuum = 0;
-            }
         }
     }
 
     if dry_run {
         println!("Dry run complete. No presentation exchanges were deleted.");
     } else {
-        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 
@@ -977,11 +952,9 @@ async fn delete_all_credex(
     batch_size: u32,
     dry_run: bool,
     verbose: bool,
-    db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
-    let mut since_last_vacuum = 0u32;
     let mut had_error = false;
 
     loop {
@@ -1048,18 +1021,12 @@ async fn delete_all_credex(
                 eprintln!("Warning: no records deleted in this batch. Stopping.");
                 break;
             }
-            since_last_vacuum += batch_deleted;
-            if since_last_vacuum >= 1000 {
-                run_vacuum(db_client).await;
-                since_last_vacuum = 0;
-            }
         }
     }
 
     if dry_run {
         println!("Dry run complete. No credential exchanges were deleted.");
     } else {
-        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 
@@ -1136,11 +1103,9 @@ async fn delete_all_oob(
     batch_size: u32,
     dry_run: bool,
     verbose: bool,
-    db_client: Option<&tokio_postgres::Client>,
 ) -> Result<(), String> {
     let client = build_client(token, api_key)?;
     let mut total_deleted = 0u32;
-    let mut since_last_vacuum = 0u32;
     let mut had_error = false;
 
     loop {
@@ -1201,18 +1166,12 @@ async fn delete_all_oob(
                 eprintln!("Warning: no records deleted in this batch. Stopping.");
                 break;
             }
-            since_last_vacuum += batch_deleted;
-            if since_last_vacuum >= 1000 {
-                run_vacuum(db_client).await;
-                since_last_vacuum = 0;
-            }
         }
     }
 
     if dry_run {
         println!("Dry run complete. No OOB invitations were deleted.");
     } else {
-        run_vacuum(db_client).await;
         println!("Done. Total deleted: {}", total_deleted);
     }
 
@@ -1277,67 +1236,168 @@ async fn list_oob(
     Ok(())
 }
 
-async fn connect_db(connection: Option<&str>, no_ssl: bool) -> Option<tokio_postgres::Client> {
-    let conn_str = connection?;
+async fn open_store_from_env() -> Result<Store, String> {
+    let storage_config = std::env::var("ACAPY_WALLET_STORAGE_CONFIG")
+        .map_err(|_| "ACAPY_WALLET_STORAGE_CONFIG is not set".to_string())?;
+    let storage_creds = std::env::var("ACAPY_WALLET_STORAGE_CREDS")
+        .map_err(|_| "ACAPY_WALLET_STORAGE_CREDS is not set".to_string())?;
+    let wallet_name = std::env::var("ACAPY_WALLET_NAME")
+        .map_err(|_| "ACAPY_WALLET_NAME is not set".to_string())?;
+    let wallet_key = std::env::var("ACAPY_WALLET_KEY")
+        .map_err(|_| "ACAPY_WALLET_KEY is not set".to_string())?;
+    let key_derivation = std::env::var("ACAPY_WALLET_KEY_DERIVATION_METHOD")
+        .unwrap_or_else(|_| "ARGON2I_MOD".to_string());
 
-    if no_ssl {
-        println!("Connecting to PostgreSQL...");
-        match tokio_postgres::connect(conn_str, NoTls).await {
-            Ok((client, connection_task)) => {
-                tokio::spawn(async move {
-                    if let Err(e) = connection_task.await {
-                        eprintln!("Database connection error: {}", e);
-                    }
-                });
-                println!("Connected to PostgreSQL.");
-                Some(client)
-            }
-            Err(e) => {
-                eprintln!("Failed to connect to database: {}", e);
-                None
-            }
-        }
-    } else {
-        println!("Connecting to PostgreSQL (SSL)...");
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        let tls = MakeRustlsConnect::new(tls_config);
-        match tokio_postgres::connect(conn_str, tls).await {
-            Ok((client, connection_task)) => {
-                tokio::spawn(async move {
-                    if let Err(e) = connection_task.await {
-                        eprintln!("Database connection error: {}", e);
-                    }
-                });
-                println!("Connected to PostgreSQL (SSL).");
-                Some(client)
-            }
-            Err(e) => {
-                eprintln!("Failed to connect to database: {}", e);
-                None
-            }
-        }
-    }
+    let config: serde_json::Value = serde_json::from_str(&storage_config)
+        .map_err(|e| format!("Failed to parse ACAPY_WALLET_STORAGE_CONFIG: {}", e))?;
+    let db_url = config["url"]
+        .as_str()
+        .ok_or("ACAPY_WALLET_STORAGE_CONFIG missing 'url' field")?;
+
+    let creds: serde_json::Value = serde_json::from_str(&storage_creds)
+        .map_err(|e| format!("Failed to parse ACAPY_WALLET_STORAGE_CREDS: {}", e))?;
+    let account = creds["account"]
+        .as_str()
+        .ok_or("ACAPY_WALLET_STORAGE_CREDS missing 'account' field")?;
+    let password = creds["password"]
+        .as_str()
+        .ok_or("ACAPY_WALLET_STORAGE_CREDS missing 'password' field")?;
+
+    let store_url = format!(
+        "postgres://{}:{}@{}/{}",
+        percent_encode(account),
+        percent_encode(password),
+        db_url,
+        percent_encode(&wallet_name),
+    );
+
+    let key_method = match key_derivation.as_str() {
+        "RAW" => StoreKeyMethod::RawKey,
+        "ARGON2I_INT" => StoreKeyMethod::DeriveKey(KdfMethod::Argon2i(Argon2Level::Interactive)),
+        _ => StoreKeyMethod::DeriveKey(KdfMethod::Argon2i(Argon2Level::Moderate)),
+    };
+
+    println!("Opening Askar store...");
+    let store = Store::open(&store_url, Some(key_method), wallet_key.into(), None)
+        .await
+        .map_err(|e| format!("Failed to open store: {}", e))?;
+    println!("Askar store opened.");
+    Ok(store)
 }
 
-async fn run_vacuum(db_client: Option<&tokio_postgres::Client>) {
-    if let Some(client) = db_client {
-        println!("Running VACUUM ANALYZE...");
-        match client.batch_execute("VACUUM ANALYZE").await {
-            Ok(()) => println!("VACUUM ANALYZE completed."),
-            Err(e) => eprintln!("Failed to run VACUUM ANALYZE: {}", e),
-        }
+async fn db_list_profiles() -> Result<(), String> {
+    let store = open_store_from_env().await?;
+    let profiles = store
+        .list_profiles()
+        .await
+        .map_err(|e| format!("Failed to list profiles: {}", e))?;
+    println!("Profiles ({}):", profiles.len());
+    for profile in &profiles {
+        println!("  {}", profile);
     }
-}
-
-async fn vacuum_analyze(connection: &str, no_ssl: bool) -> Result<(), String> {
-    let db_client = connect_db(Some(connection), no_ssl).await;
-    if db_client.is_none() {
-        return Err("Failed to connect to database".to_string());
-    }
-    run_vacuum(db_client.as_ref()).await;
+    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
+
+async fn db_list_categories(profile: &str) -> Result<(), String> {
+    let store = open_store_from_env().await?;
+    let mut scan = store
+        .scan(Some(profile.to_string()), None, None, None, None, None, false)
+        .await
+        .map_err(|e| format!("Failed to start scan: {}", e))?;
+
+    let mut category_counts: HashMap<String, usize> = HashMap::new();
+    loop {
+        let entries: Option<Vec<Entry>> = scan
+            .fetch_next()
+            .await
+            .map_err(|e| format!("Failed to fetch scan results: {}", e))?;
+        match entries {
+            Some(batch) if !batch.is_empty() => {
+                for entry in &batch {
+                    *category_counts.entry(entry.category.clone()).or_insert(0) += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut categories: Vec<_> = category_counts.into_iter().collect();
+    categories.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("Categories in profile '{}':", profile);
+    for (category, count) in &categories {
+        println!("  {} ({})", category, count);
+    }
+    println!("Total: {} categories", categories.len());
+
+    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
+    Ok(())
+}
+
+async fn db_count(profile: &str, category: &str) -> Result<(), String> {
+    let store = open_store_from_env().await?;
+    let mut session = store
+        .session(Some(profile.to_string()))
+        .await
+        .map_err(|e| format!("Failed to open session: {}", e))?;
+
+    let count = session
+        .count(Some(category), None)
+        .await
+        .map_err(|e| format!("Failed to count records: {}", e))?;
+
+    println!("Profile '{}', category '{}': {} records", profile, category, count);
+
+    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
+    Ok(())
+}
+
+async fn db_delete(profile: &str, category: &str, dry_run: bool) -> Result<(), String> {
+    let store = open_store_from_env().await?;
+    let mut session = store
+        .session(Some(profile.to_string()))
+        .await
+        .map_err(|e| format!("Failed to open session: {}", e))?;
+
+    let count = session
+        .count(Some(category), None)
+        .await
+        .map_err(|e| format!("Failed to count records: {}", e))?;
+
+    if count == 0 {
+        println!("No records found for category '{}' in profile '{}'.", category, profile);
+        store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("[DRY-RUN] Would delete {} record(s) of category '{}' in profile '{}'.", count, category, profile);
+    } else {
+        println!("Deleting {} record(s) of category '{}' in profile '{}'...", count, category, profile);
+        session
+            .remove_all(Some(category), None)
+            .await
+            .map_err(|e| format!("Failed to delete records: {}", e))?;
+        println!("Done. Deleted {} record(s).", count);
+    }
+
+    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
+    Ok(())
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
