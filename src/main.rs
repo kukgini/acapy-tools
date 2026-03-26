@@ -1385,6 +1385,7 @@ async fn db_list_categories(wallet_name: Option<&str>, profile: Option<&str>) ->
     }
     println!("Total: {} categories found", found);
 
+    drop(session);
     store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
@@ -1404,6 +1405,7 @@ async fn db_count(wallet_name: Option<&str>, profile: Option<&str>, category: &s
     let profile_label = profile.unwrap_or("default");
     println!("Profile '{}', category '{}': {} records", profile_label, category, count);
 
+    drop(session);
     store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
@@ -1424,6 +1426,7 @@ async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &
 
     if count == 0 {
         println!("No records found for category '{}' in profile '{}'.", category, profile_label);
+        drop(session);
         store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
         return Ok(());
     }
@@ -1439,6 +1442,7 @@ async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &
         println!("Done. Deleted {} record(s).", count);
     }
 
+    drop(session);
     store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
