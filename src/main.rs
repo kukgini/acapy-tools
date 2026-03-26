@@ -1332,32 +1332,34 @@ const KNOWN_CATEGORIES: &[&str] = &[
     // Connections
     "connection",
     // Out-of-Band
-    "oob-invitation",
-    // Issue Credential v1.0 / v2.0
-    "credential_exchange_v10",
-    "issue-cred-v2.0",
-    // Present Proof v1.0 / v2.0
-    "presentation_exchange_v10",
-    "present-proof-v2.0",
+    "oob_invitation",
+    "oob_record",
+    // Issue Credential v2.0
+    "cred_ex_v20",
+    "anoncreds_cred_ex_v20",
+    "indy_cred_ex_v20",
+    "ld_proof_cred_ex_v20",
+    // Present Proof v2.0
+    "pres_ex_v20",
     // Revocation
     "issuer_cred_rev",
     "issuer_rev_reg",
-    // DID Exchange
-    "did",
-    "did_doc",
+    "revocation_notification",
+    // DID
+    "did_rotate",
+    "long_peer_did_4_doc",
     // Mediation / Routing
-    "mediation_request",
-    "route_record",
-    "default_mediator",
-    "keylist_update_rule",
+    "mediation_requests",
+    "forward_route",
     // Endorsement
-    "endorse_transaction",
-    // Basic Message
-    "basicmessage",
-    // Discover Features
-    "discovery_record",
-    // Action Menu
-    "menu",
+    "transaction",
+    // Discovery
+    "discovery_exchange_v10",
+    "discovery_exchange_v20",
+    // Introduction
+    "introduction_record",
+    // Wallet (multitenancy)
+    "wallet_record",
 ];
 
 async fn db_list_categories(wallet_name: Option<&str>, profile: Option<&str>) -> Result<(), String> {
