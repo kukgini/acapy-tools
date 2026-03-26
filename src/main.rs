@@ -1323,7 +1323,6 @@ async fn db_list_profiles(wallet_name: Option<&str>) -> Result<(), String> {
     for profile in &profiles {
         println!("  {}", profile);
     }
-    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
@@ -1386,29 +1385,42 @@ const KNOWN_CATEGORIES: &[&str] = &[
 
 async fn db_list_categories(wallet_name: Option<&str>, profile: Option<&str>) -> Result<(), String> {
     let store = open_store_from_env(wallet_name, profile.is_some()).await?;
-    let mut session = store
-        .session(profile.map(|s| s.to_string()))
-        .await
-        .map_err(|e| format!("Failed to open session: {}", e))?;
 
-    let profile_label = profile.unwrap_or("default");
-    println!("Categories in profile '{}':", profile_label);
+    let profiles: Vec<String> = if let Some(p) = profile {
+        vec![p.to_string()]
+    } else {
+        store.list_profiles().await
+            .map_err(|e| format!("Failed to list profiles: {}", e))?
+    };
 
-    let mut found = 0usize;
-    for category in KNOWN_CATEGORIES {
-        let count = session
-            .count(Some(category), None)
+    for profile_name in &profiles {
+        let mut session = store
+            .session(Some(profile_name.clone()))
             .await
-            .map_err(|e| format!("Failed to count category '{}': {}", category, e))?;
-        if count > 0 {
-            println!("  {} ({})", category, count);
-            found += 1;
+            .map_err(|e| format!("Failed to open session for '{}': {}", profile_name, e))?;
+
+        let mut found = 0usize;
+        let mut results = Vec::new();
+        for category in KNOWN_CATEGORIES {
+            let count = session
+                .count(Some(category), None)
+                .await
+                .map_err(|e| format!("Failed to count category '{}': {}", category, e))?;
+            if count > 0 {
+                results.push((*category, count));
+                found += 1;
+            }
+        }
+
+        if found > 0 {
+            println!("Profile '{}':", profile_name);
+            for (category, count) in &results {
+                println!("  {} ({})", category, count);
+            }
+            println!("  ({} categories)\n", found);
         }
     }
-    println!("Total: {} categories found", found);
 
-    drop(session);
-    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
@@ -1427,8 +1439,6 @@ async fn db_count(wallet_name: Option<&str>, profile: Option<&str>, category: &s
     let profile_label = profile.unwrap_or("default");
     println!("Profile '{}', category '{}': {} records", profile_label, category, count);
 
-    drop(session);
-    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
@@ -1448,8 +1458,6 @@ async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &
 
     if count == 0 {
         println!("No records found for category '{}' in profile '{}'.", category, profile_label);
-        drop(session);
-        store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
         return Ok(());
     }
 
@@ -1463,9 +1471,6 @@ async fn db_delete(wallet_name: Option<&str>, profile: Option<&str>, category: &
             .map_err(|e| format!("Failed to delete records: {}", e))?;
         println!("Done. Deleted {} record(s).", count);
     }
-
-    drop(session);
-    store.close().await.map_err(|e| format!("Failed to close store: {}", e))?;
     Ok(())
 }
 
